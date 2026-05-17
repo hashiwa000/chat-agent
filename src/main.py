@@ -1,33 +1,68 @@
 import json
+from pathlib import Path
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessage
 import logging
 
-from tools.temp import get_room_temp, set_room_temp, tools_spec
+from tools.minecraft import search_minecraft_info, tools_spec as minecraft_tools_spec
 
 logger = logging.getLogger(__name__)
 
-# debug
-logger.setLevel(logging.DEBUG)
-logger.addHandler(logging.StreamHandler())
+APP_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "app_config.json"
 
 available_functions = {
-    "get_room_temp": get_room_temp,
-    "set_room_temp": set_room_temp,
+    "search_minecraft_info": search_minecraft_info,
 }
+all_tools_spec = minecraft_tools_spec
+
+
+def load_app_config():
+    with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+app_config = load_app_config()
+
+
+def configure_logger():
+    logger_config = app_config.get("logger", {})
+    level_name = str(logger_config.get("level", "INFO")).upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    log_format = logger_config.get(
+        "format",
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    logger.setLevel(log_level)
+    logger.handlers.clear()
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(handler)
+
+configure_logger()
 
 def process_messages(client, messages):
-    logger.debug(f'messages = {messages}')
-    logger.debug(f'tools_spec = {tools_spec}')
+    logger.debug(f'message(frontend => llm) = {messages}')
+    logger.debug(f'tools_spec = {all_tools_spec}')
 
     # ステップ 1：モデルに、ツール定義とともにメッセージを送信
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model=app_config.get("model", "gpt-4o"),
         messages=messages,
-        tools=tools_spec,
+        tools=all_tools_spec,
     )
     response_message = response.choices[0].message
-    logger.debug(f'response_message = {response_message}')
+    logger.debug(f'message(llm -> frontend) = {response_message}')
+    if response.usage is not None:
+        logger.debug(
+            "context window usage: prompt_tokens=%s, completion_tokens=%s, total_tokens=%s",
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+        )
+    else:
+        logger.debug("context window usage: unavailable")
 
     # ステップ 2：会話にモデルのレスポンスを追加
     #（関数呼び出し、または通常のメッセージの可能性がある）
@@ -47,40 +82,30 @@ def process_messages(client, messages):
                 **function_args
             )
             logger.debug(f'function result: {function_name}({function_args}) => {function_response}')
-
-        # ステップ 5：モデルが今後のターンで関数のレスポンスを
-        # 確認できるように、関数のレスポンスで会話を拡張
-        messages.append(
-            {
-                "tool_call_id": tool_call.id,
-                "role": "tool",
-                "name": function_name,
-                "content": function_response,
-            }
-        )
-
-#messages = [
-#    {
-#        "role": "system",
-#        "content": "あなたはホームボーイ、陽気で役に立つホームアシスタントです。"
-#    },
-#    {
-#        "role": "user",
-#        "content": "部屋を数度暖かくしてもらえますか。"
-#    }
-#]
+            # ステップ 5：モデルが今後のターンで関数のレスポンスを
+            # 確認できるように、関数のレスポンスで会話を拡張
+            messages.append(
+                {
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": function_name,
+                    "content": function_response,
+                }
+            )
 
 client = OpenAI()
-#process_messages(client, messages)
 
 def run_conversation(client):
     # メッセージを初期化し、エージェントの機能を説明する序文を作成
     messages = [
         {
             "role": "system",
-            "content": " あなたは、役に立つサーモスタットアシスタントです ",
+            "content": app_config.get("system_prompt", "あなたは役に立つアシスタントです。"),
         }
     ] # tools がグローバル名前空間で定義されていることに注意
+
+    print("チャットエージェントに聞きたいことを書いてください！")
+
     while True:
         # ユーザー入力を要求し、メッセージに追加
         user_input = input(">> ")
